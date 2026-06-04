@@ -1,0 +1,45 @@
+name: AWG Policy Cloud Build
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 01:00 UTC = 04:00 MSK. The published Pages directory is always complete:
+    # force is imported daily by RouterOS, full chunks are imported every 3 days.
+    - cron: "0 1 * * *"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: awg-policy-cloud
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build cloud policy artifacts
+        shell: pwsh
+        run: |
+          ./tools/build-cloud-policy.ps1 -Kind all -OutDir ./cloud-artifacts -CacheDir ./opencck-generated
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./cloud-artifacts
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

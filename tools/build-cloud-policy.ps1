@@ -168,18 +168,27 @@ function Get-Sha256([string]$Path) {
 function Write-ForcePayload {
     param(
         [string[]]$ForceIps,
+        [string[]]$MetaQuicIps,
         [hashtable]$Settings,
         [string]$BuildId,
         [string]$OutDir
     )
     $timeout = $Settings['FORCE_ENTRY_TIMEOUT']
     if (-not $timeout) { $timeout = '2d' }
+    $metaQuicList = $Settings['META_QUIC_LIST']
+    if (-not $metaQuicList) { $metaQuicList = 'awg_meta_quic_ip4' }
+    $metaQuicTimeout = $Settings['META_QUIC_ENTRY_TIMEOUT']
+    if (-not $metaQuicTimeout) { $metaQuicTimeout = $timeout }
     $file = Join-Path $OutDir 'force-update.rsc'
     $lines = [System.Collections.Generic.List[string]]::new()
     $lines.Add(":global AwgCloudForceTargetSlot")
     $lines.Add(":global AwgCloudPayloadComplete")
     $lines.Add(":set AwgCloudPayloadComplete `"`"")
     $lines.Add(":log info `"AWG_CLOUD_FORCE_PAYLOAD_START build=$BuildId count=$($ForceIps.Count)`"")
+    $lines.Add(":do { /ip/firewall/address-list/remove [find where list=`"$metaQuicList`" comment~`"awg-meta-quic-cloud`"] } on-error={}")
+    foreach ($ip in @($MetaQuicIps | Where-Object { Assert-IPv4 $_ } | Sort-Object -Unique)) {
+        $lines.Add("/ip/firewall/address-list/add list=$metaQuicList address=$ip timeout=$metaQuicTimeout comment=`"awg-meta-quic-cloud-$BuildId`"")
+    }
     $added = 0
     foreach ($ip in $ForceIps) {
         $lines.Add("/ip/firewall/address-list/add list=`$AwgCloudForceTargetSlot address=$ip timeout=$timeout comment=`"awg-force-cloud-$BuildId`"")
@@ -286,17 +295,22 @@ if ($settings['FORCE_ENTRY_TIMEOUT'] -ne '2d') {
 
 if ($Kind -in @('all', 'force')) {
     $targetDomains = Split-Values $settings['TARGET_DOMAINS']
+    $metaDomains = Split-Values $settings['META_DOMAINS']
     $forceMap = @{}
     foreach ($ip in (Resolve-TargetDomainIps -Domains $targetDomains)) { Add-UniqueIPv4 -Map $forceMap -Ip $ip }
+    $metaQuicMap = @{}
+    foreach ($ip in (Resolve-TargetDomainIps -Domains $metaDomains)) { Add-UniqueIPv4 -Map $metaQuicMap -Ip $ip }
     foreach ($range in (Split-Values $settings['TELEGRAM_FORCE_RANGES'])) { Add-UniqueIPv4OrCidr -Map $forceMap -Value $range }
     foreach ($badIp in (Split-Values $settings['META_BAD_DNS_SEEDS'])) {
         if ($forceMap.ContainsKey($badIp)) { $forceMap.Remove($badIp) }
     }
     $forceIps = @($forceMap.Keys | Sort-Object)
+    $metaQuicIps = @($metaQuicMap.Keys | Sort-Object)
     if ($forceIps.Count -lt 50) { throw "Cloud force list too small: $($forceIps.Count)" }
-    $forceManifest = Write-ForcePayload -ForceIps $forceIps -Settings $settings -BuildId $buildId -OutDir $OutDir
+    $forceManifest = Write-ForcePayload -ForceIps $forceIps -MetaQuicIps $metaQuicIps -Settings $settings -BuildId $buildId -OutDir $OutDir
+    $forceManifest['meta_quic_count'] = $metaQuicIps.Count
     Write-Manifest -Path (Join-Path $OutDir 'force-manifest.txt') -Fields $forceManifest
-    Write-Host "Force artifact: count=$($forceIps.Count)"
+    Write-Host "Force artifact: count=$($forceIps.Count), meta_quic=$($metaQuicIps.Count)"
 }
 
 if ($Kind -in @('all', 'full')) {

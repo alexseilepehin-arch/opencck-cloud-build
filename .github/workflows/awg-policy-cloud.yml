@@ -28,6 +28,10 @@ jobs:
         run: |
           ./tools/build-cloud-policy.ps1 -Kind all -OutDir ./cloud-artifacts -CacheDir ./opencck-generated
 
+      - name: Publish verified data-only channel
+        shell: pwsh
+        run: ./tools/publish-data-only-channel.ps1 -ArtifactRoot ./cloud-artifacts
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:

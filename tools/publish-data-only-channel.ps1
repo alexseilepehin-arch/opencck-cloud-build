@@ -19,6 +19,10 @@ $f=Read-CheckedPayload $force.file $force.size_bytes $force.sha256
 $forceIps=@([regex]::Matches($f,'(?m)^/ip/firewall/address-list/add list=\$AwgCloudForceTargetSlot address=([0-9./]+) timeout=[0-9a-z]+ comment="awg-force-cloud-[0-9]+"\r?$')|ForEach-Object{$_.Groups[1].Value})
 $metaIps=@([regex]::Matches($f,'(?m)^/ip/firewall/address-list/add list=awg_meta_quic_ip4 address=([0-9.]+) timeout=[0-9a-z]+ comment="awg-meta-quic-cloud-[0-9]+"\r?$')|ForEach-Object{$_.Groups[1].Value})
 if($forceIps.Count-ne[int]$force.expected_count-or$metaIps.Count-ne[int]$force.meta_quic_count){throw 'V1_FORCE_OR_META_ROWS'}
+# Meta and bootstrap DNS can legitimately differ between lookups. A QUIC allow
+# must always be backed by VPN routing; include the same Meta IPs in v2 force.
+# Legacy artifacts remain byte-for-byte unchanged.
+$forceIps=@($forceIps+$metaIps|Sort-Object -Unique)
 $fullIps=New-Object 'Collections.Generic.List[string]'
 for($n=1;$n-le[int]$full.chunk_count;$n++){
  $s=$n.ToString('D3');$b=Read-CheckedPayload $full["chunk_${s}_file"] $full["chunk_${s}_size"] $full["chunk_${s}_sha256"]

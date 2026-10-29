@@ -1,5 +1,6 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
+Import-Module (Join-Path $PSScriptRoot 'ExactIpv4Collapse.Common.psm1') -Force -DisableNameChecking
 # Pure data publisher. It never resolves names, downloads inputs, executes RSC,
 # publishes GitHub content, or writes the existing v1 root artifacts.
 function Get-Cpv2Hash([string]$Text){$s=[Security.Cryptography.SHA512]::Create();try{([BitConverter]::ToString($s.ComputeHash([Text.Encoding]::ASCII.GetBytes($Text)))).Replace('-','').ToLowerInvariant()}finally{$s.Dispose()}}
@@ -21,6 +22,11 @@ function New-CloudPolicyV2Publication {
  foreach($lane in @($ForceIps,$FullIps)){$seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal);foreach($ip in $lane){if(-not$seen.Add($ip)){throw 'CPV2_DUPLICATE_INPUT'};$r=ConvertTo-Cpv2Range $ip;if($r.Prefix-eq32){[void]$exact.Add($r.Address)}else{$ranges.Add($r)}}}
  $metaSeen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
  foreach($ip in $MetaQuicIps){if($ip.Contains('/')-or-not$metaSeen.Add($ip)){throw 'CPV2_META_IPV4_UNIQUE_REQUIRED'};$r=ConvertTo-Cpv2Range $ip;$covered=$exact.Contains($r.Address);if(-not$covered){foreach($range in $ranges){if($r.Address-ge$range.Start-and$r.Address-le$range.End){$covered=$true;break}}};if(-not$covered){throw 'CPV2_META_NOT_COVERED_BY_EXISTING_VPN_POLICY'}}
+ # FULL ONLY: validate the exact union independently before any publication bytes.
+ # Force/Meta and legacy v1 artifacts keep their original bytes and membership.
+ $fullInputCount=$FullIps.Count
+ $compaction=Get-ExactIpv4Collapse -Values $FullIps
+ $FullIps=[string[]]$compaction.Values
  $files=[ordered]@{};$force=$ForceIps-join"`n";$files['v2/force-policy.txt']=$force
  if($force.Length-ge60000){throw 'CPV2_FORCE_FILE_TOO_LARGE'}
  $forceFields=[ordered]@{version='2';kind='force';build_id=$BuildId;file='force-policy.txt';size_bytes=$force.Length;expected_count=$ForceIps.Count;sha512=(Get-Cpv2Hash $force);created_epoch=$CreatedEpoch}
@@ -32,7 +38,7 @@ function New-CloudPolicyV2Publication {
  $sidecar=[ordered]@{SchemaVersion=1;Kind='meta-quic';BuildId=$BuildId;CreatedEpoch=$CreatedEpoch;ForceGeneration=$generation;ForceManifestSHA512=$forceHash;File='meta-quic.txt';SizeBytes=$meta.Length;Count=$MetaQuicIps.Count;TTLSeconds=172800;SHA512=(Get-Cpv2Hash $meta)}|ConvertTo-Json -Compress
  $files[$base+'meta-quic.txt']=$meta;$files[$base+'manifest.json']=$sidecar;$files[$base+'manifest.seal.json']=([ordered]@{SchemaVersion=1;ForceGeneration=$generation;ManifestSHA512=(Get-Cpv2Hash $sidecar)}|ConvertTo-Json -Compress)
  $inventory=@();foreach($path in $files.Keys){$inventory+=@([pscustomobject]@{Path=$path;Bytes=$files[$path].Length;SHA512=(Get-Cpv2Hash $files[$path])})}
- [pscustomobject]@{SchemaVersion=1;BuildId=$BuildId;CreatedEpoch=$CreatedEpoch;Files=$files;Inventory=$inventory;ForceGeneration=$generation;ForceManifestSHA512=$forceHash;MetaVpnCoverageProved=$true;MetaCount=$MetaQuicIps.Count;ForceCount=$ForceIps.Count;FullCount=$FullIps.Count;ChunkSize=2000;V1Changed=$false;Published=$false;CanApply=$false}
+ [pscustomobject]@{SchemaVersion=1;BuildId=$BuildId;CreatedEpoch=$CreatedEpoch;Files=$files;Inventory=$inventory;ForceGeneration=$generation;ForceManifestSHA512=$forceHash;MetaVpnCoverageProved=$true;MetaCount=$MetaQuicIps.Count;ForceCount=$ForceIps.Count;FullCount=$FullIps.Count;FullInputCount=$fullInputCount;FullAddressCount=$compaction.Proof.AddressCount;FullCoverageProof=$compaction.Proof;ChunkSize=2000;V1Changed=$false;Published=$false;CanApply=$false}
 }
 function Test-CloudPolicyV2Publication {
  [CmdletBinding()]param([Parameter(Mandatory)]$Publication)

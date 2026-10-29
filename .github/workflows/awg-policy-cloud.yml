@@ -1,6 +1,13 @@
 name: AWG Policy Cloud Build
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/ExactIpv4Collapse.Common.psm1'
+      - 'tools/CloudPolicyV2Publisher.Common.psm1'
+      - 'tools/publish-data-only-channel.ps1'
+      - '.github/workflows/awg-policy-cloud.yml'
   workflow_dispatch:
   schedule:
     # 18:17 UTC = 21:17 MSK. Build and Pages deployment run in advance:

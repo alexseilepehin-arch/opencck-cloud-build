@@ -31,4 +31,7 @@ for($n=1;$n-le[int]$full.chunk_count;$n++){
 if($fullIps.Count-ne[int]$full.expected_count){throw 'V1_FULL_ROWS'}
 $created=[DateTimeOffset]::ParseExact($full.created_at_utc,'yyyy-MM-ddTHH:mm:ssZ',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AssumeUniversal).ToUnixTimeSeconds()
 $publication=New-CloudPolicyV2Publication -BuildId $full.build_id -ForceIps $forceIps -MetaQuicIps $metaIps -FullIps $fullIps.ToArray() -CreatedEpoch $created
+if($publication.FullCount -lt 50000){throw 'V2_COMPACT_FULL_BELOW_ROUTER_50000_ENTRY_GUARD'}
+if(-not $publication.FullCoverageProof.Equivalent){throw 'V2_FULL_EXACT_COVERAGE_REQUIRED'}
+Write-Host ('FULL_EXACT_CIDR input_entries='+$publication.FullInputCount+' output_entries='+$publication.FullCount+' addresses='+$publication.FullAddressCount+' interval_sha512='+$publication.FullCoverageProof.IntervalSHA512)
 Write-CloudPolicyV2Publication -Publication $publication -OutputRoot $ArtifactRoot

@@ -7,6 +7,16 @@ on:
       - 'tools/ExactIpv4Collapse.Common.psm1'
       - 'tools/CloudPolicyV2Publisher.Common.psm1'
       - 'tools/publish-data-only-channel.ps1'
+      - 'tools/publish-full-v3-channel.ps1'
+      - 'tools/CloudPolicyV3Publisher.Common.psm1'
+      - 'cloud-seed/full-20261106230947.zip'
+      - '.github/workflows/awg-policy-cloud.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tools/publish-full-v3-channel.ps1'
+      - 'tools/CloudPolicyV3Publisher.Common.psm1'
+      - 'cloud-seed/full-20261106230947.zip'
       - '.github/workflows/awg-policy-cloud.yml'
   workflow_dispatch:
   schedule:
@@ -16,6 +26,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   pages: write
   id-token: write
 
@@ -39,12 +50,64 @@ jobs:
         shell: pwsh
         run: ./tools/publish-data-only-channel.ps1 -ArtifactRoot ./cloud-artifacts
 
+      - name: Build and verify Full v3
+        id: full-v3
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUIRE_FULL_V3: ${{ github.ref != 'refs/heads/main' }}
+        run: |
+          $inputs = @{
+            ArtifactRoot = './cloud-artifacts'
+            HistoryOutputRoot = "$env:RUNNER_TEMP/full-v3-history"
+            ScratchRoot = "$env:RUNNER_TEMP/full-v3-stage"
+            SeedZip = './cloud-seed/full-20261106230947.zip'
+            RequireV3 = $env:REQUIRE_FULL_V3 -eq 'true'
+          }
+          ./tools/publish-full-v3-channel.ps1 @inputs
+
+      - name: Retain verified Full v3 history
+        id: full-v3-history
+        continue-on-error: true
+        if: github.ref == 'refs/heads/main' && steps.full-v3.outputs.history_ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-v3-history
+          path: ${{ runner.temp }}/full-v3-history
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Preserve previous Full v3 if history upload failed
+        if: github.ref == 'refs/heads/main' && steps.full-v3-history.outcome == 'failure'
+        shell: pwsh
+        run: |
+          $artifact = (Resolve-Path -LiteralPath ./cloud-artifacts).Path
+          $current = Join-Path $artifact 'v3/full'
+          if (Test-Path -LiteralPath $current) {
+            $resolved = (Resolve-Path -LiteralPath $current).Path
+            if (!$resolved.StartsWith($artifact + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'FULL_V3_FALLBACK_PATH' }
+            $rejected = Join-Path $env:RUNNER_TEMP 'rejected-full-v3'
+            if (Test-Path -LiteralPath $rejected) { throw 'FULL_V3_FALLBACK_TARGET' }
+            Move-Item -LiteralPath $resolved -Destination $rejected -ErrorAction Stop
+          }
+          Import-Module ./tools/CloudPolicyV3Publisher.Common.psm1 -Force
+          $previous = Join-Path $env:RUNNER_TEMP 'full-v3-stage/prior'
+          if (Test-Path -LiteralPath $previous) {
+            try {
+              Copy-VerifiedCloudPolicyV3Channel -HistoryRoot $previous -ArtifactRoot $artifact
+            } catch {
+              Write-Warning "Full v3 fallback is unavailable. Legacy artifacts remain valid."
+            }
+          }
+
       - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./cloud-artifacts
 
   deploy:
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     environment:

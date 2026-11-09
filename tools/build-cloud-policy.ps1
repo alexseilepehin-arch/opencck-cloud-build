@@ -95,29 +95,127 @@ function Resolve-TargetDomainIps([string[]]$Domains) {
     @($map.Keys | Sort-Object)
 }
 
+function Install-OpenCckSrsDecoder([string]$Directory) {
+    $version = '1.14.4'
+    $release = "sing-box-$version-windows-amd64"
+    $archive = Join-Path $Directory 'sing-box.zip'
+    $decoder = Join-Path $Directory 'sing-box.exe'
+    $url = "https://github.com/SagerNet/sing-box/releases/download/v$version/$release.zip"
+    Invoke-WebRequest -UseBasicParsing -Uri $url -TimeoutSec 90 -OutFile $archive
+    if ((Get-Sha256 $archive) -cne '99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df') {
+        throw 'OPENCCK_SRS_DECODER_HASH'
+    }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+    try {
+        $entry = $zip.GetEntry("$release/sing-box.exe")
+        if (!$entry) { throw 'OPENCCK_SRS_DECODER_MISSING' }
+        [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $decoder)
+    } finally {
+        $zip.Dispose()
+    }
+    $decoder
+}
+
+function Get-OpenCckSrsIPv4([string]$Group, [string]$Directory, [string]$Decoder) {
+    $encoded = [uri]::EscapeDataString($Group)
+    $url = "https://iplist.opencck.org/?format=srs&version=1&group=$encoded&data=ip4"
+    $inputFile = Join-Path $Directory 'group.srs'
+    $outputFile = Join-Path $Directory 'group.json'
+    try {
+        $download = Invoke-WebRequest -UseBasicParsing -Uri $url -TimeoutSec 90 -OutFile $inputFile -PassThru
+        $length = $download.Headers['Content-Length']
+        if ($download.StatusCode -ne 200 -or ($length -and (Get-Item -LiteralPath $inputFile).Length -ne [long]($length -join ''))) {
+            throw 'OPENCCK_SRS_INCOMPLETE'
+        }
+        $stream = [IO.File]::OpenRead($inputFile)
+        try {
+            if ($stream.ReadByte() -ne 83 -or $stream.ReadByte() -ne 82 -or $stream.ReadByte() -ne 83 -or $stream.ReadByte() -ne 1) {
+                throw 'OPENCCK_SRS_HEADER'
+            }
+        } finally {
+            $stream.Dispose()
+        }
+        & $Decoder rule-set decompile --output $outputFile $inputFile | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw 'OPENCCK_SRS_DECODE' }
+        $response = Get-Content -LiteralPath $outputFile -Raw | ConvertFrom-Json
+        if ($response.version -ne 1 -or @($response.rules).Count -ne 1 -or
+            ($response.rules[0].PSObject.Properties.Name -join ',') -cne 'ip_cidr' -or !$response.rules[0].ip_cidr) {
+            throw 'OPENCCK_SRS_RULE_SHAPE'
+        }
+
+        # OpenCCK builds SRS from the same ip4 rows. The decoder may combine
+        # adjacent hosts into prefixes, so expand them back to the original set.
+        $ips = [Collections.Generic.List[string]]::new()
+        foreach ($cidr in $response.rules[0].ip_cidr) {
+            if ($cidr -notmatch '^(?<ip>\d{1,3}(\.\d{1,3}){3})/(?<prefix>\d{1,2})$') { throw 'OPENCCK_SRS_IPV4' }
+            $address = $Matches['ip']
+            $prefix = [int]$Matches['prefix']
+            if ($prefix -gt 32 -or !(Assert-IPv4 $address)) { throw 'OPENCCK_SRS_IPV4' }
+            $octets = [Net.IPAddress]::Parse($address).GetAddressBytes()
+            [array]::Reverse($octets)
+            $network = [long][BitConverter]::ToUInt32($octets, 0)
+            $size = [long]1 -shl (32 - $prefix)
+            if ($network % $size -ne 0 -or ($ips.Count + $size) -gt 1000000) { throw 'OPENCCK_SRS_EXPANSION_LIMIT' }
+            for ($value = $network; $value -lt ($network + $size); $value++) {
+                $ips.Add(('{0}.{1}.{2}.{3}' -f (($value -shr 24) -band 255), (($value -shr 16) -band 255), (($value -shr 8) -band 255), ($value -band 255)))
+            }
+        }
+        $ips.ToArray()
+    } finally {
+        foreach ($path in $inputFile, $outputFile) {
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
+        }
+    }
+}
+
 function New-OpenCckMap {
     param([string[]]$Groups)
 
     $map = @{}
-    foreach ($group in $Groups) {
-        $encoded = [uri]::EscapeDataString($group)
-        $url = "https://iplist.opencck.org/?format=text&group=$encoded&data=ip4"
-        Write-Host "Downloading OpenCCK group: $group"
-        $content = $null
-        for ($attempt = 1; $attempt -le 3; $attempt++) {
-            try {
-                $content = (Invoke-WebRequest -UseBasicParsing -Uri $url -TimeoutSec 180).Content
-                break
-            } catch {
-                Write-Warning "OpenCCK group '$group' download failed, attempt ${attempt}/3: $($_.Exception.Message)"
-                if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
+    $scratch = $null
+    $decoder = $null
+    try {
+        foreach ($group in $Groups) {
+            $encoded = [uri]::EscapeDataString($group)
+            $url = "https://iplist.opencck.org/?format=text&group=$encoded&data=ip4"
+            Write-Host "Downloading OpenCCK group: $group"
+            $rows = @()
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+                try {
+                    $response = Invoke-WebRequest -UseBasicParsing -Uri $url -TimeoutSec 180
+                    $candidate = @($response.Content -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                    if ($response.StatusCode -ne 200 -or !$candidate.Count) { throw 'OPENCCK_EMPTY_RESPONSE' }
+                    foreach ($ip in $candidate) {
+                        if (!(Assert-IPv4 $ip)) { throw 'OPENCCK_INVALID_IPV4_RESPONSE' }
+                    }
+                    $rows = $candidate
+                    break
+                } catch {
+                    Write-Warning "OpenCCK group '$group' download failed, attempt ${attempt}/3: $($_.Exception.Message)"
+                    if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
+                }
             }
+            if (!$rows.Count) {
+                Write-Warning "OpenCCK group '$group' text download failed. Trying the same IPv4 list as SRS."
+                if (!$decoder) {
+                    $scratch = Join-Path ([IO.Path]::GetTempPath()) ('opencck-srs-' + [guid]::NewGuid().ToString('N'))
+                    New-Item -ItemType Directory -Path $scratch | Out-Null
+                    $decoder = Install-OpenCckSrsDecoder -Directory $scratch
+                }
+                $rows = @(Get-OpenCckSrsIPv4 -Group $group -Directory $scratch -Decoder $decoder)
+                Write-Host "OpenCCK group '$group': SRS accepted ($($rows.Count) IPv4 addresses)"
+            }
+            foreach ($ip in $rows) { $map[$ip] = $true }
         }
-        if (-not $content) {
-            throw "OPENCCK_DOWNLOAD_FAILED group=$group"
-        }
-        foreach ($line in ($content -split "\r?\n")) {
-            Add-UniqueIPv4 -Map $map -Ip $line
+    } finally {
+        if ($scratch) {
+            foreach ($name in 'sing-box.zip', 'sing-box.exe') {
+                $path = Join-Path $scratch $name
+                if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
+            }
+            Remove-Item -LiteralPath $scratch
         }
     }
     $map

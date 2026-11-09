@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     paths:
+      - 'tools/build-cloud-policy.ps1'
       - 'tools/ExactIpv4Collapse.Common.psm1'
       - 'tools/CloudPolicyV2Publisher.Common.psm1'
       - 'tools/publish-data-only-channel.ps1'
@@ -14,6 +15,7 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - 'tools/build-cloud-policy.ps1'
       - 'tools/publish-full-v3-channel.ps1'
       - 'tools/CloudPolicyV3Publisher.Common.psm1'
       - 'cloud-seed/full-20261106230947.zip'
